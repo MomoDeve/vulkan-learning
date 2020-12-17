@@ -5,9 +5,8 @@
 
 #include <iostream>
 #include <vector>
-#include <optional>
 
-bool CheckDeviceProperties(const vk::Instance& instance, const vk::PhysicalDevice& device, const vk::PhysicalDeviceProperties& properties, uint32_t& queueFamilyIndex)
+bool CheckDeviceProperties(const vk::Instance& instance, const vk::PhysicalDevice& device, const vk::PhysicalDeviceProperties& properties, const vk::SurfaceKHR surface, uint32_t& queueFamilyIndex)
 {
     if (!(VK_VERSION_MAJOR(properties.apiVersion) == 1 && VK_VERSION_MINOR(properties.apiVersion) == 2))
     {
@@ -20,6 +19,7 @@ bool CheckDeviceProperties(const vk::Instance& instance, const vk::PhysicalDevic
     for (const auto& property : queueFamilyProperties)
     {
         if ((property.queueCount > 0) &&
+            (device.getSurfaceSupportKHR(index, surface)) &&
             (glfwGetPhysicalDevicePresentationSupport(instance, device, index)) &&
             (property.queueFlags & vk::QueueFlagBits::eGraphics) &&
             (property.queueFlags & vk::QueueFlagBits::eCompute))
@@ -80,6 +80,18 @@ int main()
         std::cout << '\t' << extension.extensionName << '\n';
     }
 
+    // create window
+
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+    GLFWwindow* window = glfwCreateWindow(1600, 900, "vulkan-learning", nullptr, nullptr);
+    vk::SurfaceKHR surface;
+    if (glfwCreateWindowSurface(instance, window, nullptr, (VkSurfaceKHR*)&surface) != VkResult::VK_SUCCESS)
+    {
+        std::cerr << "cannot create surface\n";
+        return 0;
+    }
+
     // acquire physical devices
 
     auto physicalDevices = instance.enumeratePhysicalDevices();
@@ -105,7 +117,7 @@ int main()
             std::cout << "\t\t" << extension.extensionName << '\n';
         }
             
-        if (CheckDeviceProperties(instance, device, properties, currentQueueFamilyIndex))
+        if (CheckDeviceProperties(instance, device, properties, surface, currentQueueFamilyIndex))
         {
             currentPhysicalDevice = device;
         }
@@ -117,7 +129,29 @@ int main()
         std::cerr << "no suitable physical device was found\n";
         return 0;
     }
+
     std::cout << "selected device: " << currentPhysicalDevice.getProperties().deviceName << '\n';
+
+    auto surfaceCapabilities = currentPhysicalDevice.getSurfaceCapabilitiesKHR(surface);
+
+    auto surfaceFormats = currentPhysicalDevice.getSurfaceFormatsKHR(surface);
+    std::cout << "supported surface formats:\n";
+    vk::SurfaceFormatKHR surfaceFormat;
+    for (const auto& format : surfaceFormats)
+    {
+        std::cout << '\t' << vk::to_string(format.format) << '\n';
+        if (format.format == vk::Format::eR8G8B8A8Unorm)
+            surfaceFormat = format;
+    }
+    if (surfaceFormat.format == vk::Format::eUndefined)
+        surfaceFormat = surfaceFormats.front();
+
+    auto presentModes = currentPhysicalDevice.getSurfacePresentModesKHR(surface);
+    std::cout << "supported present modes:\n";
+    for (const auto& presentMode : presentModes)
+    {
+        std::cout << '\t' << vk::to_string(presentMode) << '\n';
+    }
 
     vk::DeviceQueueCreateInfo deviceQueueCreateInfo;
     deviceQueueCreateInfo.setQueueFamilyIndex(currentQueueFamilyIndex);
@@ -125,27 +159,27 @@ int main()
 
     vk::DeviceCreateInfo deviceCreateInfo;
     deviceCreateInfo.setQueueCreateInfos(std::array{ deviceQueueCreateInfo });
-    
-    vk::Device logicalDevice = currentPhysicalDevice.createDevice(deviceCreateInfo);
-    vk::Queue deviceQueue = logicalDevice.getQueue(currentQueueFamilyIndex, 0);
-
-    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-    GLFWwindow* window = glfwCreateWindow(1600, 900, "vulkan-learning", nullptr, nullptr);
-    vk::SurfaceKHR surface;
-    if (glfwCreateWindowSurface(instance, window, nullptr, (VkSurfaceKHR*)&surface) != VkResult::VK_SUCCESS)
+    deviceCreateInfo.setPEnabledExtensionNames(std::array
     {
-        std::cerr << "cannot create surface\n";
-        return 0;
-    }
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME
+    });
+    
+    vk::Device device = currentPhysicalDevice.createDevice(deviceCreateInfo);
+    vk::Queue deviceQueue = device.getQueue(currentQueueFamilyIndex, 0);
+
+    vk::Semaphore imageAvailableSemaphore = device.createSemaphore(vk::SemaphoreCreateInfo{ });
+    vk::Semaphore renderingFinishedSemaphore = device.createSemaphore(vk::SemaphoreCreateInfo{ });
 
     while (!glfwWindowShouldClose(window))
     {
         glfwPollEvents();
     }
 
+    device.destroySemaphore(renderingFinishedSemaphore);
+    device.destroySemaphore(imageAvailableSemaphore);
+
+    device.destroy();
     instance.destroySurfaceKHR(surface);
-    logicalDevice.destroy();
     instance.destroy();
 
     glfwDestroyWindow(window);

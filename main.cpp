@@ -343,6 +343,16 @@ int main()
 
     auto swapchainImages = VulkanInstance.Device.getSwapchainImagesKHR(VulkanInstance.Swapchain);
 
+    vk::AttachmentDescription attachmentDescription;
+    attachmentDescription
+        .setFormat(VulkanInstance.SurfaceFormat.format)
+        .setSamples(vk::SampleCountFlagBits::e1)
+        .setLoadOp(vk::AttachmentLoadOp::eClear)
+        .setStoreOp(vk::AttachmentStoreOp::eStore)
+        .setStencilLoadOp(vk::AttachmentLoadOp::eDontCare)
+        .setStencilStoreOp(vk::AttachmentStoreOp::eDontCare)
+        .setInitialLayout(vk::ImageLayout::ePresentSrcKHR)
+        .setFinalLayout(vk::ImageLayout::ePresentSrcKHR);
 
     int framesSinceMeasure = 0;
     double measureStartTime = glfwGetTime();

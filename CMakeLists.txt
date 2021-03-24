@@ -16,3 +16,5 @@ add_executable(${PROJECT_NAME} ${SOURCES})
 
 target_include_directories(${PROJECT_NAME} PUBLIC ${Vulkan_INCLUDE_DIR} ${GLFW_INCLUDE_DIR})
 target_link_libraries(${PROJECT_NAME} PUBLIC ${Vulkan_LIBRARIES} glfw)
+
+target_compile_definitions(${PROJECT_NAME} PUBLIC -D APPLICATION_WORKING_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}")

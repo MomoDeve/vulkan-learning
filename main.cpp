@@ -1,10 +1,11 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
-
 #include <vulkan/vulkan.hpp>
 
 #include <iostream>
 #include <vector>
+#include <fstream>
+#include <filesystem>
 #include <algorithm>
 
 bool CheckDeviceProperties(const vk::Instance& instance, const vk::PhysicalDevice& device, const vk::PhysicalDeviceProperties& properties, const vk::SurfaceKHR surface, uint32_t& queueFamilyIndex)
@@ -57,13 +58,36 @@ struct VulkanStaticData
     vk::SurfaceFormatKHR SurfaceFormat;
     vk::PresentModeKHR SurfacePresentMode;
     uint32_t PresentImageCount;
-    vk::RenderPass MainRenderPass;
+    vk::ShaderModule MainVertexShader;
+    vk::ShaderModule MainFragmentShader;
+    vk::RenderPass MainRenderPass; 
+    vk::Pipeline GraphicPipeline;
     vk::Semaphore RenderingFinishedSemaphore;
     vk::Semaphore ImageAvailableSemaphore;
     vk::Queue DeviceQueue;
     vk::SwapchainKHR Swapchain;
     uint32_t FamilyQueueIndex;
 } VulkanInstance;
+
+std::vector<char> ReadFileAsBinary(const std::string& filename)
+{
+    std::vector<char> result;
+    std::ifstream file(filename, std::ios_base::binary);
+    if (!file.good()) std::cerr << "cannot open file: " << filename << std::endl;
+    result = std::vector<char>(std::istreambuf_iterator(file), std::istreambuf_iterator<char>());
+    return result;
+}
+
+vk::ShaderModule CreateShaderModule(const std::string& filename)
+{
+    auto bytecode = ReadFileAsBinary(filename);
+    vk::ShaderModuleCreateInfo createInfo;
+    createInfo
+        .setPCode(reinterpret_cast<const uint32_t*>(bytecode.data()))
+        .setCodeSize(bytecode.size());
+
+    return VulkanInstance.Device.createShaderModule(createInfo);
+}
 
 void UpdateSurfaceExtent(VulkanStaticData& vulkan, int newSurfaceWidth, int newSurfaceHeight)
 {
@@ -97,11 +121,13 @@ void RecreateSwapchain(VulkanStaticData& vulkan, int newSurfaceWidth, int newSur
         .setOldSwapchain(vulkan.Swapchain);
 
     vulkan.Swapchain = vulkan.Device.createSwapchainKHR(swapchainCreateInfo);
+    std::cout << "vk::SwapChainKHR created\n";
     if (bool(swapchainCreateInfo.oldSwapchain))
         vulkan.Device.destroySwapchainKHR(swapchainCreateInfo.oldSwapchain);
 
     if (bool(vulkan.CommandPool)) vulkan.Device.destroyCommandPool(vulkan.CommandPool);
     vulkan.CommandPool = vulkan.Device.createCommandPool(vk::CommandPoolCreateInfo{ { }, vulkan.FamilyQueueIndex });
+    std::cout << "vk::CommandPool created\n";
 
     vulkan.CommandBuffers = vulkan.Device.allocateCommandBuffers(vk::CommandBufferAllocateInfo{
         vulkan.CommandPool,
@@ -116,10 +142,9 @@ void RecreateSwapchain(VulkanStaticData& vulkan, int newSurfaceWidth, int newSur
     }
     vulkan.FrameBuffers.resize(vulkan.PresentImageCount);
 
-    vk::CommandBufferBeginInfo commandBeginInfo;
-    commandBeginInfo.setFlags(vk::CommandBufferUsageFlagBits::eSimultaneousUse);
-
     vk::ClearColorValue clearColor{ std::array{1.0f, 0.8f, 0.4f, 0.0f} };
+    vk::ClearValue clearValue{ clearColor };
+
     vk::ImageSubresourceRange imageSubresourceRange;
     imageSubresourceRange
         .setAspectMask(vk::ImageAspectFlagBits::eColor)
@@ -129,62 +154,10 @@ void RecreateSwapchain(VulkanStaticData& vulkan, int newSurfaceWidth, int newSur
         .setLayerCount(1);
 
     auto swapchainImages = vulkan.Device.getSwapchainImagesKHR(vulkan.Swapchain);
+
+    // create framebuffers
     for (uint32_t i = 0; i < vulkan.PresentImageCount; i++)
     {
-        // recreate command buffers
-
-        vk::ImageMemoryBarrier barrierFromPresentToClear;
-        barrierFromPresentToClear
-            .setSrcAccessMask(vk::AccessFlagBits::eMemoryRead)
-            .setDstAccessMask(vk::AccessFlagBits::eTransferWrite)
-            .setOldLayout(vk::ImageLayout::eUndefined)
-            .setNewLayout(vk::ImageLayout::eTransferDstOptimal)
-            .setSrcQueueFamilyIndex(vulkan.FamilyQueueIndex)
-            .setDstQueueFamilyIndex(vulkan.FamilyQueueIndex)
-            .setImage(swapchainImages[i])
-            .setSubresourceRange(imageSubresourceRange);
-
-        vk::ImageMemoryBarrier barrierFromClearToPresent;
-        barrierFromClearToPresent
-            .setSrcAccessMask(vk::AccessFlagBits::eTransferWrite)
-            .setDstAccessMask(vk::AccessFlagBits::eMemoryRead)
-            .setOldLayout(vk::ImageLayout::eTransferDstOptimal)
-            .setNewLayout(vk::ImageLayout::ePresentSrcKHR)
-            .setSrcQueueFamilyIndex(vulkan.FamilyQueueIndex)
-            .setDstQueueFamilyIndex(vulkan.FamilyQueueIndex)
-            .setImage(swapchainImages[i])
-            .setSubresourceRange(imageSubresourceRange);
-
-        vulkan.CommandBuffers[i].begin(commandBeginInfo);
-        vulkan.CommandBuffers[i].pipelineBarrier(
-            vk::PipelineStageFlagBits::eTransfer,
-            vk::PipelineStageFlagBits::eTransfer,
-            vk::DependencyFlags{ },
-            std::array<vk::MemoryBarrier, 0>{ },
-            std::array<vk::BufferMemoryBarrier, 0>{ },
-            std::array{ barrierFromPresentToClear }
-        );
-
-        vulkan.CommandBuffers[i].clearColorImage(
-            swapchainImages[i],
-            vk::ImageLayout::eTransferDstOptimal,
-            clearColor,
-            std::array{ imageSubresourceRange }
-        );
-
-        vulkan.CommandBuffers[i].pipelineBarrier(
-            vk::PipelineStageFlagBits::eTransfer,
-            vk::PipelineStageFlagBits::eBottomOfPipe,
-            vk::DependencyFlags{ },
-            std::array<vk::MemoryBarrier, 0>{ },
-            std::array<vk::BufferMemoryBarrier, 0>{ },
-            std::array{ barrierFromClearToPresent }
-        );
-
-        vulkan.CommandBuffers[i].end();
-
-        // recreate framebuffers
-
         vk::ImageViewCreateInfo imageViewCreateInfo;
         imageViewCreateInfo
             .setImage(swapchainImages[i])
@@ -210,10 +183,178 @@ void RecreateSwapchain(VulkanStaticData& vulkan, int newSurfaceWidth, int newSur
 
         vulkan.FrameBuffers[i].Buffer = vulkan.Device.createFramebuffer(frameBufferCreateInfo);
     }
+    std::cout << "framebuffers created\n";
+
+    // creating graphic pipeline
+
+    std::array shaderStageCreateInfos = {
+        vk::PipelineShaderStageCreateInfo {
+            vk::PipelineShaderStageCreateFlags{ },
+            vk::ShaderStageFlagBits::eVertex,
+            vulkan.MainVertexShader,
+            "main"
+        },
+        vk::PipelineShaderStageCreateInfo {
+            vk::PipelineShaderStageCreateFlags{ },
+            vk::ShaderStageFlagBits::eFragment,
+            vulkan.MainFragmentShader,
+            "main"
+        }
+    };
+
+    vk::PipelineVertexInputStateCreateInfo vertexInputStateCreateInfo;
+
+    vk::PipelineInputAssemblyStateCreateInfo inputAssemblyStateCreateInfo;
+    inputAssemblyStateCreateInfo.setTopology(vk::PrimitiveTopology::eTriangleList);
+
+    vk::Viewport viewport = { 0.0f, 0.0f, (float)newSurfaceWidth, (float)newSurfaceHeight, 0.0f, 1.0f };
+    vk::Rect2D scissor = { vk::Offset2D{ 0, 0 }, vk::Extent2D{ (uint32_t)newSurfaceWidth, (uint32_t)newSurfaceHeight } };
+    vk::PipelineViewportStateCreateInfo viewportStateCreateInfo;
+    viewportStateCreateInfo
+        .setViewports(viewport)
+        .setScissors(scissor);
+
+    vk::PipelineRasterizationStateCreateInfo rasterizationStateCreateInfo;
+    rasterizationStateCreateInfo
+        .setPolygonMode(vk::PolygonMode::eFill)
+        .setCullMode(vk::CullModeFlagBits::eBack)
+        .setFrontFace(vk::FrontFace::eCounterClockwise)
+        .setLineWidth(1.0f);
+
+    vk::PipelineMultisampleStateCreateInfo multisampleStateCreateInfo;
+    multisampleStateCreateInfo
+        .setRasterizationSamples(vk::SampleCountFlagBits::e1)
+        .setMinSampleShading(1.0f);
+
+    vk::PipelineColorBlendAttachmentState colorBlendAttachmentState;
+    colorBlendAttachmentState
+        .setBlendEnable(false)
+        .setSrcColorBlendFactor(vk::BlendFactor::eOne)
+        .setDstColorBlendFactor(vk::BlendFactor::eZero)
+        .setColorBlendOp(vk::BlendOp::eAdd)
+        .setSrcAlphaBlendFactor(vk::BlendFactor::eOne)
+        .setDstAlphaBlendFactor(vk::BlendFactor::eZero)
+        .setAlphaBlendOp(vk::BlendOp::eAdd)
+        .setColorWriteMask(vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG | vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA);
+
+    vk::PipelineColorBlendStateCreateInfo colorBlendStateCreateInfo;
+    colorBlendStateCreateInfo
+        .setLogicOpEnable(false)
+        .setLogicOp(vk::LogicOp::eCopy)
+        .setAttachments(colorBlendAttachmentState)
+        .setBlendConstants({ 0.0f, 0.0f, 0.0f, 0.0f });
+
+    auto layout = vulkan.Device.createPipelineLayoutUnique(vk::PipelineLayoutCreateInfo{ });
+
+    vk::GraphicsPipelineCreateInfo pipelineCreateInfo;
+    pipelineCreateInfo
+        .setStages(shaderStageCreateInfos)
+        .setPVertexInputState(&vertexInputStateCreateInfo)
+        .setPInputAssemblyState(&inputAssemblyStateCreateInfo)
+        .setPTessellationState(nullptr)
+        .setPViewportState(&viewportStateCreateInfo)
+        .setPRasterizationState(&rasterizationStateCreateInfo)
+        .setPMultisampleState(&multisampleStateCreateInfo)
+        .setPDepthStencilState(nullptr)
+        .setPColorBlendState(&colorBlendStateCreateInfo)
+        .setPDynamicState(nullptr)
+        .setLayout(*layout)
+        .setRenderPass(vulkan.MainRenderPass)
+        .setSubpass(0)
+        .setBasePipelineHandle(vk::Pipeline{ })
+        .setBasePipelineIndex(0);
+
+    auto pipeline = vulkan.Device.createGraphicsPipeline(vk::PipelineCache{ }, pipelineCreateInfo);
+    if (pipeline.result != vk::Result::eSuccess)
+        std::cerr << "cannot create vk::Pipeline: " + vk::to_string(pipeline.result) << std::endl;
+
+    if (bool(vulkan.GraphicPipeline)) 
+        vulkan.Device.destroyPipeline(vulkan.GraphicPipeline);
+
+    vulkan.GraphicPipeline = pipeline.value;
+    std::cout << "vk::Pipeline created\n";
+
+    // create command buffers
+    for (size_t i = 0; i < vulkan.PresentImageCount; i++)
+    {
+        vk::ImageMemoryBarrier barrierFromPresentToDraw;
+        barrierFromPresentToDraw
+            .setSrcAccessMask(vk::AccessFlagBits::eMemoryRead)
+            .setDstAccessMask(vk::AccessFlagBits::eTransferWrite)
+            .setOldLayout(vk::ImageLayout::eUndefined)
+            .setNewLayout(vk::ImageLayout::eTransferDstOptimal)
+            .setSrcQueueFamilyIndex(vulkan.FamilyQueueIndex)
+            .setDstQueueFamilyIndex(vulkan.FamilyQueueIndex)
+            .setImage(swapchainImages[i])
+            .setSubresourceRange(imageSubresourceRange);
+
+        vk::ImageMemoryBarrier barrierFromDrawToPresent;
+        barrierFromDrawToPresent
+            .setSrcAccessMask(vk::AccessFlagBits::eTransferWrite)
+            .setDstAccessMask(vk::AccessFlagBits::eMemoryRead)
+            .setOldLayout(vk::ImageLayout::eTransferDstOptimal)
+            .setNewLayout(vk::ImageLayout::ePresentSrcKHR)
+            .setSrcQueueFamilyIndex(vulkan.FamilyQueueIndex)
+            .setDstQueueFamilyIndex(vulkan.FamilyQueueIndex)
+            .setImage(swapchainImages[i])
+            .setSubresourceRange(imageSubresourceRange);
+
+
+        vk::CommandBufferBeginInfo commandBeginInfo;
+        commandBeginInfo.setFlags(vk::CommandBufferUsageFlagBits::eSimultaneousUse);
+
+        vulkan.CommandBuffers[i].begin(commandBeginInfo);
+
+        // not needed as same queue is used
+        // vulkan.CommandBuffers[i].pipelineBarrier(
+        //     vk::PipelineStageFlagBits::eTransfer,
+        //     vk::PipelineStageFlagBits::eTransfer,
+        //     vk::DependencyFlags{ },
+        //     std::array<vk::MemoryBarrier, 0>{ },
+        //     std::array<vk::BufferMemoryBarrier, 0>{ },
+        //     std::array{ barrierFromPresentToDraw }
+        // );
+
+        // vulkan.CommandBuffers[i].clearColorImage(
+        //     swapchainImages[i],
+        //     vk::ImageLayout::eTransferDstOptimal,
+        //     clearColor,
+        //     std::array{ imageSubresourceRange }
+        // );
+
+        vk::RenderPassBeginInfo renderPassBeginInfo;
+        renderPassBeginInfo
+            .setRenderPass(vulkan.MainRenderPass)
+            .setFramebuffer(vulkan.FrameBuffers[i].Buffer)
+            .setRenderArea(scissor)
+            .setClearValues(clearValue);
+
+        vulkan.CommandBuffers[i].beginRenderPass(renderPassBeginInfo, vk::SubpassContents::eInline);
+        vulkan.CommandBuffers[i].bindPipeline(vk::PipelineBindPoint::eGraphics, vulkan.GraphicPipeline);
+        // draw!
+        vulkan.CommandBuffers[i].draw(3, 1, 0, 0);
+
+        vulkan.CommandBuffers[i].endRenderPass();
+
+        // not needed as same queue is used
+        // vulkan.CommandBuffers[i].pipelineBarrier(
+        //     vk::PipelineStageFlagBits::eTransfer,
+        //     vk::PipelineStageFlagBits::eBottomOfPipe,
+        //     vk::DependencyFlags{ },
+        //     std::array<vk::MemoryBarrier, 0>{ },
+        //     std::array<vk::BufferMemoryBarrier, 0>{ },
+        //     std::array{ barrierFromDrawToPresent }
+        // );
+
+        vulkan.CommandBuffers[i].end();
+    }
+    std::cout << "command buffers created\n";
 }
 
 int main()
 {
+    std::filesystem::current_path(APPLICATION_WORKING_DIRECTORY);
+
     if (!glfwInit())
     {
         std::cerr << "cannot initialize GLFW\n";
@@ -259,8 +400,8 @@ int main()
     // create window
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    const int windowWidth = 1600;
-    const int windowHeight = 900;
+    const int windowWidth = 800;
+    const int windowHeight = 800;
     GLFWwindow* window = glfwCreateWindow(windowWidth, windowHeight, "vulkan-learning", nullptr, nullptr);
     if (glfwCreateWindowSurface(VulkanInstance.Instance, window, nullptr, (VkSurfaceKHR*)&VulkanInstance.Surface) != VkResult::VK_SUCCESS)
     {
@@ -375,6 +516,7 @@ int main()
     deviceCreateInfo.setPEnabledExtensionNames(extenstionNames);
     
     VulkanInstance.Device = VulkanInstance.PhysicalDevice.createDevice(deviceCreateInfo);
+    std::cout << "vk::Device created\n";
     VulkanInstance.DeviceQueue = VulkanInstance.Device.getQueue(VulkanInstance.FamilyQueueIndex, 0);
 
     VulkanInstance.ImageAvailableSemaphore = VulkanInstance.Device.createSemaphore(vk::SemaphoreCreateInfo{ });
@@ -407,9 +549,13 @@ int main()
         .setSubpasses(subpassDescription);
 
     VulkanInstance.MainRenderPass = VulkanInstance.Device.createRenderPass(renderPassCreateInfo);
+    std::cout << "vk::RenderPass created\n";
+    VulkanInstance.MainVertexShader = CreateShaderModule("main_vertex.spv");
+    VulkanInstance.MainFragmentShader = CreateShaderModule("main_fragment.spv");
+    std::cout << "main shader created\n";
 
-    auto SwapchainCreator = [](GLFWwindow* window, int width, int height) { RecreateSwapchain(VulkanInstance, width, height); };
-    SwapchainCreator(window, windowWidth, windowHeight);
+    auto SwapchainCreator = [](GLFWwindow* window, int width, int height) { std::cout << "recreating swapchain...\n"; RecreateSwapchain(VulkanInstance, width, height); };
+    RecreateSwapchain(VulkanInstance, windowWidth, windowHeight);
     glfwSetWindowSizeCallback(window, SwapchainCreator);
 
     auto swapchainImages = VulkanInstance.Device.getSwapchainImagesKHR(VulkanInstance.Swapchain);
@@ -464,6 +610,10 @@ int main()
         VulkanInstance.Device.destroyFramebuffer(fb.Buffer);
         VulkanInstance.Device.destroyImageView(fb.View);
     }
+
+    VulkanInstance.Device.destroyPipeline(VulkanInstance.GraphicPipeline);
+    VulkanInstance.Device.destroyShaderModule(VulkanInstance.MainVertexShader);
+    VulkanInstance.Device.destroyShaderModule(VulkanInstance.MainFragmentShader);
 
     VulkanInstance.Device.destroyCommandPool(VulkanInstance.CommandPool);
 

@@ -37,6 +37,12 @@ bool CheckDeviceProperties(const vk::Instance& instance, const vk::PhysicalDevic
     return false;
 }
 
+struct FrameBufferData
+{
+    vk::Framebuffer Buffer;
+    vk::ImageView View;
+};
+
 struct VulkanStaticData
 {
     vk::Instance Instance;
@@ -44,12 +50,14 @@ struct VulkanStaticData
     vk::Device Device;
     vk::CommandPool CommandPool;
     std::vector<vk::CommandBuffer> CommandBuffers;
+    std::vector<FrameBufferData> FrameBuffers;
     vk::SurfaceKHR Surface;
     vk::SurfaceCapabilitiesKHR SurfaceCapabilities;
     vk::Extent2D SurfaceExtent;
     vk::SurfaceFormatKHR SurfaceFormat;
     vk::PresentModeKHR SurfacePresentMode;
     uint32_t PresentImageCount;
+    vk::RenderPass MainRenderPass;
     vk::Semaphore RenderingFinishedSemaphore;
     vk::Semaphore ImageAvailableSemaphore;
     vk::Queue DeviceQueue;
@@ -101,6 +109,13 @@ void RecreateSwapchain(VulkanStaticData& vulkan, int newSurfaceWidth, int newSur
         vulkan.PresentImageCount
     });
 
+    if (!vulkan.FrameBuffers.empty()) for (const auto& fb : vulkan.FrameBuffers)
+    {
+        vulkan.Device.destroy(fb.Buffer);
+        vulkan.Device.destroy(fb.View);
+    }
+    vulkan.FrameBuffers.resize(vulkan.PresentImageCount);
+
     vk::CommandBufferBeginInfo commandBeginInfo;
     commandBeginInfo.setFlags(vk::CommandBufferUsageFlagBits::eSimultaneousUse);
 
@@ -116,6 +131,8 @@ void RecreateSwapchain(VulkanStaticData& vulkan, int newSurfaceWidth, int newSur
     auto swapchainImages = vulkan.Device.getSwapchainImagesKHR(vulkan.Swapchain);
     for (uint32_t i = 0; i < vulkan.PresentImageCount; i++)
     {
+        // recreate command buffers
+
         vk::ImageMemoryBarrier barrierFromPresentToClear;
         barrierFromPresentToClear
             .setSrcAccessMask(vk::AccessFlagBits::eMemoryRead)
@@ -165,6 +182,33 @@ void RecreateSwapchain(VulkanStaticData& vulkan, int newSurfaceWidth, int newSur
         );
 
         vulkan.CommandBuffers[i].end();
+
+        // recreate framebuffers
+
+        vk::ImageViewCreateInfo imageViewCreateInfo;
+        imageViewCreateInfo
+            .setImage(swapchainImages[i])
+            .setViewType(vk::ImageViewType::e2D)
+            .setFormat(vulkan.SurfaceFormat.format)
+            .setSubresourceRange(imageSubresourceRange)
+            .setComponents(vk::ComponentMapping {
+                vk::ComponentSwizzle::eIdentity,
+                vk::ComponentSwizzle::eIdentity,
+                vk::ComponentSwizzle::eIdentity,
+                vk::ComponentSwizzle::eIdentity
+            });
+
+        vulkan.FrameBuffers[i].View = vulkan.Device.createImageView(imageViewCreateInfo);
+
+        vk::FramebufferCreateInfo frameBufferCreateInfo;
+        frameBufferCreateInfo
+            .setRenderPass(vulkan.MainRenderPass)
+            .setAttachments(vulkan.FrameBuffers[i].View)
+            .setWidth(newSurfaceWidth)
+            .setHeight(newSurfaceHeight)
+            .setLayers(1);
+
+        vulkan.FrameBuffers[i].Buffer = vulkan.Device.createFramebuffer(frameBufferCreateInfo);
     }
 }
 
@@ -336,12 +380,6 @@ int main()
     VulkanInstance.ImageAvailableSemaphore = VulkanInstance.Device.createSemaphore(vk::SemaphoreCreateInfo{ });
     VulkanInstance.RenderingFinishedSemaphore = VulkanInstance.Device.createSemaphore(vk::SemaphoreCreateInfo{ });
 
-    auto SwapchainCreator = [](GLFWwindow* window, int width, int height) { RecreateSwapchain(VulkanInstance, width, height); };
-    SwapchainCreator(window, windowWidth, windowHeight);
-    glfwSetWindowSizeCallback(window, SwapchainCreator);
-
-    auto swapchainImages = VulkanInstance.Device.getSwapchainImagesKHR(VulkanInstance.Swapchain);
-
     vk::AttachmentDescription attachmentDescription;
     attachmentDescription
         .setFormat(VulkanInstance.SurfaceFormat.format)
@@ -352,6 +390,29 @@ int main()
         .setStencilStoreOp(vk::AttachmentStoreOp::eDontCare)
         .setInitialLayout(vk::ImageLayout::ePresentSrcKHR)
         .setFinalLayout(vk::ImageLayout::ePresentSrcKHR);
+
+    vk::AttachmentReference colorAttachmentReference;
+    colorAttachmentReference
+        .setAttachment(0)
+        .setLayout(vk::ImageLayout::eColorAttachmentOptimal);
+
+    vk::SubpassDescription subpassDescription;
+    subpassDescription
+        .setPipelineBindPoint(vk::PipelineBindPoint::eGraphics)
+        .setColorAttachments(colorAttachmentReference);
+
+    vk::RenderPassCreateInfo renderPassCreateInfo;
+    renderPassCreateInfo
+        .setAttachments(attachmentDescription)
+        .setSubpasses(subpassDescription);
+
+    VulkanInstance.MainRenderPass = VulkanInstance.Device.createRenderPass(renderPassCreateInfo);
+
+    auto SwapchainCreator = [](GLFWwindow* window, int width, int height) { RecreateSwapchain(VulkanInstance, width, height); };
+    SwapchainCreator(window, windowWidth, windowHeight);
+    glfwSetWindowSizeCallback(window, SwapchainCreator);
+
+    auto swapchainImages = VulkanInstance.Device.getSwapchainImagesKHR(VulkanInstance.Swapchain);
 
     int framesSinceMeasure = 0;
     double measureStartTime = glfwGetTime();
@@ -396,6 +457,13 @@ int main()
     }
 
     VulkanInstance.Device.waitIdle();
+
+    VulkanInstance.Device.destroyRenderPass(VulkanInstance.MainRenderPass);
+    for (const auto& fb : VulkanInstance.FrameBuffers)
+    {
+        VulkanInstance.Device.destroyFramebuffer(fb.Buffer);
+        VulkanInstance.Device.destroyImageView(fb.View);
+    }
 
     VulkanInstance.Device.destroyCommandPool(VulkanInstance.CommandPool);
 

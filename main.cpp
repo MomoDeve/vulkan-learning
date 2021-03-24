@@ -321,15 +321,14 @@ int main()
         VulkanInstance.SurfaceFormat = surfaceFormats.front();
 
     vk::DeviceQueueCreateInfo deviceQueueCreateInfo;
+    std::array queuePriorities = { 1.0f };
     deviceQueueCreateInfo.setQueueFamilyIndex(VulkanInstance.FamilyQueueIndex);
-    deviceQueueCreateInfo.setQueuePriorities(std::array{ 1.0f });
+    deviceQueueCreateInfo.setQueuePriorities(queuePriorities);
 
     vk::DeviceCreateInfo deviceCreateInfo;
-    deviceCreateInfo.setQueueCreateInfos(std::array{ deviceQueueCreateInfo });
-    deviceCreateInfo.setPEnabledExtensionNames(std::array
-    {
-        VK_KHR_SWAPCHAIN_EXTENSION_NAME
-    });
+    std::array extenstionNames = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+    deviceCreateInfo.setQueueCreateInfos(deviceQueueCreateInfo);
+    deviceCreateInfo.setPEnabledExtensionNames(extenstionNames);
     
     VulkanInstance.Device = VulkanInstance.PhysicalDevice.createDevice(deviceCreateInfo);
     VulkanInstance.DeviceQueue = VulkanInstance.Device.getQueue(VulkanInstance.FamilyQueueIndex, 0);
@@ -366,23 +365,25 @@ int main()
             std::cerr << "acquired image was not ready!" << std::endl;
 
         vk::Image renderTarget = swapchainImages[acquireImageResult.value];
+        std::array waitDstStageMask = { (vk::PipelineStageFlags)vk::PipelineStageFlagBits::eTransfer };
 
         vk::SubmitInfo submitInfo;
         submitInfo
             .setWaitSemaphores(VulkanInstance.ImageAvailableSemaphore)
-            .setWaitDstStageMask(std::array{ (vk::PipelineStageFlags)vk::PipelineStageFlagBits::eTransfer })
+            .setWaitDstStageMask(waitDstStageMask)
             .setSignalSemaphores(VulkanInstance.RenderingFinishedSemaphore)
-            .setCommandBuffers(std::array{ VulkanInstance.CommandBuffers[acquireImageResult.value] });
+            .setCommandBuffers(VulkanInstance.CommandBuffers[acquireImageResult.value]);
         
         VulkanInstance.DeviceQueue.submit(std::array{ submitInfo }, vk::Fence{ });
 
         vk::PresentInfoKHR presentInfo;
         presentInfo
-            .setWaitSemaphores(std::array{ VulkanInstance.RenderingFinishedSemaphore })
-            .setSwapchains(std::array{ VulkanInstance.Swapchain })
-            .setImageIndices(std::array{ acquireImageResult.value });
+            .setWaitSemaphores(VulkanInstance.RenderingFinishedSemaphore)
+            .setSwapchains(VulkanInstance.Swapchain)
+            .setImageIndices(acquireImageResult.value);
 
-        VulkanInstance.DeviceQueue.presentKHR(presentInfo);
+        auto presetSucceeded = VulkanInstance.DeviceQueue.presentKHR(presentInfo);
+        assert(presetSucceeded == vk::Result::eSuccess);
 
         if ((++framesSinceMeasure) == 360)
         {

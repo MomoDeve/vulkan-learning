@@ -1,7 +1,9 @@
 #define GLFW_INCLUDE_VULKAN
+#define STB_IMAGE_IMPLEMENTATION
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
 #include <vulkan/vulkan.hpp>
+#include <stb_image.h>
 
 #include <iostream>
 #include <vector>
@@ -42,7 +44,22 @@ bool CheckDeviceProperties(const vk::Instance& instance, const vk::PhysicalDevic
 struct BufferData
 {
     vk::Buffer Buffer;
+    vk::DeviceMemory DeviceMemory;
+    void* HostMemory = nullptr;
+};
+
+struct ImageData
+{
+    vk::Image Image;
     vk::DeviceMemory Memory;
+    vk::ImageView View;
+};
+
+struct DescriptorSetData
+{
+    vk::DescriptorSetLayout Layout;
+    vk::DescriptorPool Pool;
+    vk::DescriptorSet Set;
 };
 
 struct VirtualFrame
@@ -69,11 +86,15 @@ struct VulkanStaticData
     vk::Semaphore RenderingFinishedSemaphore;
     vk::Semaphore ImageAvailableSemaphore;
     vk::RenderPass MainRenderPass; 
+    ImageData Texture;
+    vk::Sampler TextureSampler;
     std::array<VirtualFrame, VirtualFrameCount> VirtualFrames; 
     std::vector<vk::ImageView> SwapchainImageViews;
     BufferData VertexBuffer;
     BufferData StagingBuffer;
+    DescriptorSetData DescriptorSet;
     vk::Pipeline GraphicPipeline;
+    vk::PipelineLayout GraphicPipelineLayout;
     vk::Queue DeviceQueue;
     vk::SwapchainKHR Swapchain;
     uint32_t FamilyQueueIndex;
@@ -111,7 +132,7 @@ void UpdateSurfaceExtent(VulkanStaticData& vulkan, int newSurfaceWidth, int newS
 struct VertexData
 {
     glm::vec4 Position;
-    glm::vec4 Color;
+    glm::vec2 TexCoord;
 };
 
 void RecreateFramebuffer(VulkanStaticData& vulkan, VirtualFrame& frame, size_t presentImageIndex)
@@ -170,6 +191,7 @@ void WriteCommandBuffer(VulkanStaticData& vulkan, VirtualFrame& frame)
     vk::Rect2D scissor = { vk::Offset2D{ 0, 0 }, vulkan.SurfaceExtent };
     frame.CommandBuffer.setScissor(0, scissor);
 
+    frame.CommandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, vulkan.GraphicPipelineLayout, 0, vulkan.DescriptorSet.Set, { });
     frame.CommandBuffer.bindVertexBuffers(0, vulkan.VertexBuffer.Buffer, { 0 });
 
     frame.CommandBuffer.draw(6, 1, 0, 0);
@@ -257,44 +279,59 @@ BufferData CreateBuffer(VulkanStaticData& vulkan, size_t allocationSize, vk::Buf
                 .setAllocationSize(bufferMemoryRequirements.size)
                 .setMemoryTypeIndex(memoryTypeIndex);
 
-            result.Memory = vulkan.Device.allocateMemory(memoryAllocateInfo);
-            vulkan.Device.bindBufferMemory(result.Buffer, result.Memory, 0);
+            result.DeviceMemory = vulkan.Device.allocateMemory(memoryAllocateInfo);
+            vulkan.Device.bindBufferMemory(result.Buffer, result.DeviceMemory, 0);
             std::cout << "allocated buffer memory (" << bufferMemoryRequirements.size << " bytes)\n";
             break;
         }
         memoryTypeIndex++;
     }
-    if (!(bool)result.Memory) std::cerr << "cannot find requested memory type for buffer" << std::endl;
+    if (!(bool)result.DeviceMemory) std::cerr << "cannot find requested memory type for buffer" << std::endl;
 
     return result;
+}
+
+void InitializeStagingBuffer(VulkanStaticData& vulkan)
+{
+    constexpr size_t StagingBufferSize = 1024 * 1024 * 256;
+
+    vulkan.StagingBuffer = CreateBuffer(
+        VulkanInstance,
+        StagingBufferSize,
+        vk::BufferUsageFlagBits::eTransferSrc,
+        vk::MemoryPropertyFlagBits::eHostVisible
+    );
+    std::cout << "staging buffer created\n";
+
+    vulkan.StagingBuffer.HostMemory = vulkan.Device.mapMemory(vulkan.StagingBuffer.DeviceMemory, 0, StagingBufferSize);
 }
 
 void InitializeVertexBuffer(VulkanStaticData& vulkan)
 {
     std::array vertexData = {
        VertexData {
-           glm::vec4 { -0.7f, -0.7f, 0.0f, 1.0f },
-           glm::vec4 { 1.0f, 0.0f, 0.0f, 0.0f }
+           glm::vec4 { -0.9f, -0.9f, 0.0f, 1.0f },
+           glm::vec2 { 0.0f, 0.0f },
        },
        VertexData {
-           glm::vec4 { -0.7f, 0.7f, 0.0f, 1.0f },
-           glm::vec4 { 0.0f, 1.0f, 0.0f, 0.0f }
+           glm::vec4 { -0.9f, 0.9f, 0.0f, 1.0f },
+           glm::vec2 { 0.0f, 1.0f },
        },
        VertexData {
-           glm::vec4 { 0.7f, -0.7f, 0.0f, 1.0f },
-           glm::vec4 { 0.0f, 0.0f, 1.0f, 0.0f }
+           glm::vec4 { 0.9f, -0.9f, 0.0f, 1.0f },
+           glm::vec2 { 1.0f, 0.0f },
        },
        VertexData {
-           glm::vec4 { 0.7f, 0.7f, 0.0f, 1.0f },
-           glm::vec4 { 0.3f, 0.3f, 0.3f, 0.0f }
+           glm::vec4 { 0.9f, 0.9f, 0.0f, 1.0f },
+           glm::vec2 { 1.0f, 1.0f },
        },
        VertexData {
-           glm::vec4 { 0.7f, -0.7f, 0.0f, 1.0f },
-           glm::vec4 { 0.0f, 0.0f, 1.0f, 0.0f }
+           glm::vec4 { 0.9f, -0.9f, 0.0f, 1.0f },
+           glm::vec2 { 1.0f, 0.0f },
        },
        VertexData {
-           glm::vec4 { -0.7f, 0.7f, 0.0f, 1.0f },
-           glm::vec4 { 0.0f, 1.0f, 0.0f, 0.0f }
+           glm::vec4 { -0.9f, 0.9f, 0.0f, 1.0f },
+           glm::vec2 { 0.0f, 1.0f },
        },
     };
     constexpr size_t VertexBufferSize = vertexData.size() * sizeof(VertexData);
@@ -305,25 +342,16 @@ void InitializeVertexBuffer(VulkanStaticData& vulkan)
         vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eTransferDst,
         vk::MemoryPropertyFlagBits::eDeviceLocal
     );
-    vulkan.StagingBuffer = CreateBuffer(
-        VulkanInstance,
-        4096,
-        vk::BufferUsageFlagBits::eTransferSrc,
-        vk::MemoryPropertyFlagBits::eHostVisible
-    );
-    std::cout << "buffers created\n";
 
-    void* mappedMemory = vulkan.Device.mapMemory(vulkan.StagingBuffer.Memory, 0, VertexBufferSize);
-    std::memcpy(mappedMemory, (const void*)vertexData.data(), VertexBufferSize);
+    std::memcpy(vulkan.StagingBuffer.HostMemory, (const void*)vertexData.data(), VertexBufferSize);
 
     vk::MappedMemoryRange flushRange;
     flushRange
-        .setMemory(vulkan.StagingBuffer.Memory)
+        .setMemory(vulkan.StagingBuffer.DeviceMemory)
         .setSize(VertexBufferSize)
         .setOffset(0);
 
     vulkan.Device.flushMappedMemoryRanges(flushRange);
-    vulkan.Device.unmapMemory(vulkan.StagingBuffer.Memory);
 
     vk::CommandBuffer& commandBuffer = vulkan.VirtualFrames.front().CommandBuffer;
 
@@ -387,6 +415,54 @@ void InitializeCommandBuffers(VulkanStaticData& vulkan)
         // create command buffer fence
         virtualFrame.CommandQueueFence = vulkan.Device.createFence(vk::FenceCreateInfo{ vk::FenceCreateFlagBits::eSignaled });
     }
+}
+
+void InitializeDescriptorSet(VulkanStaticData& vulkan)
+{
+    vk::DescriptorSetLayoutBinding layoutBinding;
+    layoutBinding
+        .setDescriptorType(vk::DescriptorType::eCombinedImageSampler)
+        .setDescriptorCount(1)
+        .setStageFlags(vk::ShaderStageFlagBits::eFragment);
+
+    vk::DescriptorSetLayoutCreateInfo descriptorSetLayout;
+    descriptorSetLayout.setBindings(layoutBinding);
+
+    vulkan.DescriptorSet.Layout = vulkan.Device.createDescriptorSetLayout(descriptorSetLayout);
+
+    vk::DescriptorPoolSize poolSize;
+    poolSize
+        .setType(vk::DescriptorType::eCombinedImageSampler)
+        .setDescriptorCount(1);
+
+    vk::DescriptorPoolCreateInfo descriptorPoolCreateInfo;
+    descriptorPoolCreateInfo
+        .setMaxSets(1)
+        .setPoolSizes(poolSize);
+
+    vulkan.DescriptorSet.Pool = vulkan.Device.createDescriptorPool(descriptorPoolCreateInfo);
+
+    vk::DescriptorSetAllocateInfo descriptorSetAllocateInfo;
+    descriptorSetAllocateInfo
+        .setDescriptorPool(vulkan.DescriptorSet.Pool)
+        .setSetLayouts(vulkan.DescriptorSet.Layout);
+
+    vulkan.DescriptorSet.Set = vulkan.Device.allocateDescriptorSets(descriptorSetAllocateInfo).front();
+
+    vk::DescriptorImageInfo descriptorImageInfo;
+    descriptorImageInfo
+        .setImageLayout(vk::ImageLayout::eShaderReadOnlyOptimal)
+        .setImageView(vulkan.Texture.View)
+        .setSampler(vulkan.TextureSampler);
+
+    vk::WriteDescriptorSet writeDescriptorSet;
+    writeDescriptorSet
+        .setDescriptorCount(1)
+        .setDstSet(vulkan.DescriptorSet.Set)
+        .setDescriptorType(vk::DescriptorType::eCombinedImageSampler)
+        .setImageInfo(descriptorImageInfo);
+
+    vulkan.Device.updateDescriptorSets(writeDescriptorSet, { });
 }
 
 void InitializeRenderPass(VulkanStaticData& vulkan)
@@ -482,8 +558,8 @@ void InitializeGraphicPipeline(VulkanStaticData& vulkan)
         vk::VertexInputAttributeDescription {
             1,
             vertexBindingDescriptions[0].binding,
-            vk::Format::eR32G32B32A32Sfloat,
-            offsetof(VertexData, Color)
+            vk::Format::eR32G32Sfloat,
+            offsetof(VertexData, TexCoord)
         }
     };
 
@@ -532,7 +608,10 @@ void InitializeGraphicPipeline(VulkanStaticData& vulkan)
         .setAttachments(colorBlendAttachmentState)
         .setBlendConstants({ 0.0f, 0.0f, 0.0f, 0.0f });
 
-    auto layout = vulkan.Device.createPipelineLayoutUnique(vk::PipelineLayoutCreateInfo{ });
+    vk::PipelineLayoutCreateInfo layoutCreateInfo;
+    layoutCreateInfo.setSetLayouts(vulkan.DescriptorSet.Layout);
+
+    vulkan.GraphicPipelineLayout = vulkan.Device.createPipelineLayout(layoutCreateInfo);
 
     std::array dynamicStates = {
         vk::DynamicState::eViewport,
@@ -554,7 +633,7 @@ void InitializeGraphicPipeline(VulkanStaticData& vulkan)
         .setPDepthStencilState(nullptr)
         .setPColorBlendState(&colorBlendStateCreateInfo)
         .setPDynamicState(&dynamicStateCreateInfo)
-        .setLayout(*layout)
+        .setLayout(vulkan.GraphicPipelineLayout)
         .setRenderPass(vulkan.MainRenderPass)
         .setSubpass(0)
         .setBasePipelineHandle(vk::Pipeline{ })
@@ -566,6 +645,188 @@ void InitializeGraphicPipeline(VulkanStaticData& vulkan)
 
     vulkan.GraphicPipeline = pipeline.value;
     std::cout << "graphic pipeline created\n";
+}
+
+ImageData CreateImage(VulkanStaticData& vulkan, size_t width, size_t height)
+{
+    ImageData result;
+
+    vk::ImageCreateInfo imageCreateInfo;
+    imageCreateInfo
+        .setImageType(vk::ImageType::e2D)
+        .setFormat(vk::Format::eR8G8B8A8Unorm)
+        .setExtent(vk::Extent3D{ (uint32_t)width, (uint32_t)height, 1 })
+        .setSamples(vk::SampleCountFlagBits::e1)
+        .setMipLevels(1)
+        .setArrayLayers(1)
+        .setTiling(vk::ImageTiling::eOptimal)
+        .setUsage(vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled)
+        .setSharingMode(vk::SharingMode::eExclusive)
+        .setInitialLayout(vk::ImageLayout::eUndefined);
+
+    result.Image = vulkan.Device.createImage(imageCreateInfo);
+
+    vk::MemoryRequirements imageMemoryRequirements = vulkan.Device.getImageMemoryRequirements(result.Image);
+    vk::PhysicalDeviceMemoryProperties memoryProperties = vulkan.PhysicalDevice.getMemoryProperties();
+
+    size_t memoryTypeIndex = 0;
+    for (const auto& property : memoryProperties.memoryTypes)
+    {
+        if (property.propertyFlags & vk::MemoryPropertyFlagBits::eDeviceLocal)
+        {
+            vk::MemoryAllocateInfo memoryAllocateInfo;
+            memoryAllocateInfo
+                .setAllocationSize(imageMemoryRequirements.size)
+                .setMemoryTypeIndex(memoryTypeIndex);
+
+            result.Memory = vulkan.Device.allocateMemory(memoryAllocateInfo);
+            vulkan.Device.bindImageMemory(result.Image, result.Memory, 0);
+            std::cout << "allocated image memory (" << imageMemoryRequirements.size << " bytes)\n";
+            break;
+        }
+        memoryTypeIndex++;
+    }
+    if (!(bool)result.Memory) std::cerr << "cannot find requested memory type for image" << std::endl;
+
+    return result;
+}
+
+void InitializeTexture(VulkanStaticData& vulkan)
+{
+    int width, height, channels;
+    const unsigned char* textureData = stbi_load("vulkan-logo.png", &width, &height, &channels, 4);
+    if (textureData == nullptr)
+    {
+        std::cerr << "cannot load texture file" << std::endl;
+    }
+    size_t textureByteSize = size_t(width * height * 4);
+
+    vulkan.Texture = CreateImage(vulkan, (size_t)width, (size_t)height);
+
+    vk::ImageSubresourceRange subresourceRange {
+            vk::ImageAspectFlagBits::eColor,
+            0, // base mip level
+            1, // level count
+            0, // base layer
+            1  // layer count
+    };
+
+    vk::ImageViewCreateInfo imageViewCreateInfo;
+    imageViewCreateInfo
+        .setImage(vulkan.Texture.Image)
+        .setViewType(vk::ImageViewType::e2D)
+        .setFormat(vk::Format::eR8G8B8A8Unorm)
+        .setComponents(vk::ComponentMapping {
+            vk::ComponentSwizzle::eIdentity,
+            vk::ComponentSwizzle::eIdentity,
+            vk::ComponentSwizzle::eIdentity,
+            vk::ComponentSwizzle::eIdentity 
+        })
+        .setSubresourceRange(subresourceRange);
+
+    vulkan.Texture.View = vulkan.Device.createImageView(imageViewCreateInfo);
+
+    std::memcpy(vulkan.StagingBuffer.HostMemory, (const void*)textureData, textureByteSize);
+    vk::MappedMemoryRange flushRange;
+    flushRange
+        .setMemory(vulkan.StagingBuffer.DeviceMemory)
+        .setSize(textureByteSize)
+        .setOffset(0);
+
+    vulkan.Device.flushMappedMemoryRanges(flushRange);
+
+    vk::CommandBuffer& commandBuffer = vulkan.VirtualFrames.front().CommandBuffer;
+
+    commandBuffer.begin(vk::CommandBufferBeginInfo{ vk::CommandBufferUsageFlagBits::eOneTimeSubmit });
+
+    vk::ImageMemoryBarrier imageTransferMemoryBarrier;
+    imageTransferMemoryBarrier
+        .setSrcAccessMask(vk::AccessFlagBits::eNoneKHR)
+        .setDstAccessMask(vk::AccessFlagBits::eTransferWrite)
+        .setOldLayout(vk::ImageLayout::eUndefined)
+        .setNewLayout(vk::ImageLayout::eTransferDstOptimal)
+        .setSrcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+        .setDstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+        .setImage(vulkan.Texture.Image)
+        .setSubresourceRange(subresourceRange);
+
+    commandBuffer.pipelineBarrier(
+        vk::PipelineStageFlagBits::eTopOfPipe,
+        vk::PipelineStageFlagBits::eTransfer,
+        { }, // dependency flags
+        { }, // memory barriers
+        { }, // buffer barriers
+        imageTransferMemoryBarrier
+    );
+
+    vk::BufferImageCopy imageCopyInfo;
+    imageCopyInfo
+        .setBufferOffset(0)
+        .setBufferRowLength(0)
+        .setBufferImageHeight(0)
+        .setImageSubresource(vk::ImageSubresourceLayers {
+            vk::ImageAspectFlagBits::eColor,
+            0, // base mip level
+            0, // base layer
+            1  // layer count
+        })
+        .setImageOffset(vk::Offset3D{ 0, 0, 0 })
+        .setImageExtent(vk::Extent3D{ (uint32_t)width, (uint32_t)height, 1 });
+
+    commandBuffer.copyBufferToImage(vulkan.StagingBuffer.Buffer, vulkan.Texture.Image, vk::ImageLayout::eTransferDstOptimal, imageCopyInfo);
+
+    vk::ImageMemoryBarrier imageCopyMemoryBarrier;
+    imageCopyMemoryBarrier
+        .setSrcAccessMask(vk::AccessFlagBits::eTransferWrite)
+        .setDstAccessMask(vk::AccessFlagBits::eShaderRead)
+        .setOldLayout(vk::ImageLayout::eTransferDstOptimal)
+        .setNewLayout(vk::ImageLayout::eShaderReadOnlyOptimal)
+        .setSrcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+        .setDstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+        .setImage(vulkan.Texture.Image)
+        .setSubresourceRange(subresourceRange);
+
+    commandBuffer.pipelineBarrier(
+        vk::PipelineStageFlagBits::eTransfer,
+        vk::PipelineStageFlagBits::eFragmentShader,
+        { }, // dependency flags
+        { }, // memory barriers
+        { }, // buffer barriers
+        imageCopyMemoryBarrier
+    );
+
+    commandBuffer.end();
+
+    vk::SubmitInfo bufferCopySubmitInfo;
+    bufferCopySubmitInfo.setCommandBuffers(commandBuffer);
+
+    vulkan.DeviceQueue.submit(bufferCopySubmitInfo);
+
+    vulkan.Device.waitIdle();
+    stbi_image_free((void*)textureData);
+}
+
+void InitializeTextureSampler(VulkanStaticData& vulkan)
+{
+    vk::SamplerCreateInfo samplerCreateInfo;
+    samplerCreateInfo
+        .setMagFilter(vk::Filter::eLinear)
+        .setMinFilter(vk::Filter::eLinear)
+        .setMipmapMode(vk::SamplerMipmapMode::eLinear)
+        .setAddressModeU(vk::SamplerAddressMode::eClampToEdge)
+        .setAddressModeV(vk::SamplerAddressMode::eClampToEdge)
+        .setAddressModeW(vk::SamplerAddressMode::eClampToEdge)
+        .setMipLodBias(0.0f)
+        .setAnisotropyEnable(false)
+        .setMaxAnisotropy(1.0f)
+        .setCompareEnable(false)
+        .setCompareOp(vk::CompareOp::eAlways)
+        .setMinLod(0.0f)
+        .setMaxLod(0.0f)
+        .setBorderColor(vk::BorderColor::eFloatTransparentBlack)
+        .setUnnormalizedCoordinates(false);
+
+    vulkan.TextureSampler = vulkan.Device.createSampler(samplerCreateInfo);
 }
 
 void RecreateSwapchain(VulkanStaticData& vulkan, int newSurfaceWidth, int newSurfaceHeight)
@@ -681,8 +942,8 @@ int main()
     // create window
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    const int windowWidth = 800;
-    const int windowHeight = 800;
+    const int windowWidth = 1200;
+    const int windowHeight = 400;
     GLFWwindow* window = glfwCreateWindow(windowWidth, windowHeight, "vulkan-learning", nullptr, nullptr);
     if (glfwCreateWindowSurface(VulkanInstance.Instance, window, nullptr, (VkSurfaceKHR*)&VulkanInstance.Surface) != VkResult::VK_SUCCESS)
     {
@@ -810,7 +1071,12 @@ int main()
     auto swapchainImages = VulkanInstance.Device.getSwapchainImagesKHR(VulkanInstance.Swapchain);
 
     InitializeCommandBuffers(VulkanInstance);
+    InitializeStagingBuffer(VulkanInstance); 
     InitializeVertexBuffer(VulkanInstance);
+    InitializeTexture(VulkanInstance);
+    InitializeTextureSampler(VulkanInstance);
+    InitializeTextureSampler(VulkanInstance);
+    InitializeDescriptorSet(VulkanInstance);
     InitializeRenderPass(VulkanInstance);
     InitializeGraphicPipeline(VulkanInstance);
 
@@ -840,6 +1106,13 @@ int main()
     VulkanInstance.Device.destroyBuffer(VulkanInstance.VertexBuffer.Buffer);
     VulkanInstance.Device.destroyBuffer(VulkanInstance.StagingBuffer.Buffer);
 
+    VulkanInstance.Device.destroyImage(VulkanInstance.Texture.Image);
+    VulkanInstance.Device.destroyImageView(VulkanInstance.Texture.View);
+    VulkanInstance.Device.destroySampler(VulkanInstance.TextureSampler);
+
+    VulkanInstance.Device.destroyDescriptorPool(VulkanInstance.DescriptorSet.Pool);
+    VulkanInstance.Device.destroyDescriptorSetLayout(VulkanInstance.DescriptorSet.Layout);
+
     VulkanInstance.Device.destroyRenderPass(VulkanInstance.MainRenderPass);
     for (const auto& virtualFrame : VulkanInstance.VirtualFrames)
     {
@@ -856,6 +1129,7 @@ int main()
     }
 
     VulkanInstance.Device.destroyPipeline(VulkanInstance.GraphicPipeline);
+    VulkanInstance.Device.destroyPipelineLayout(VulkanInstance.GraphicPipelineLayout);
 
     VulkanInstance.Device.destroyCommandPool(VulkanInstance.CommandPool);
 

@@ -1,17 +1,17 @@
 #version 450
 
 layout(location = 0) in vec4 iPosition;
-layout(location = 1) in vec4 iColor;
+layout(location = 1) in vec2 iTexCoord;
 
 out gl_PerVertex
 {
     vec4 gl_Position;
 };
 
-layout(location = 0) out vec4 vColor;
+layout(location = 0) out vec2 vTexCoord;
 
 void main() 
 {
     gl_Position = iPosition;
-    vColor = iColor;
+    vTexCoord = iTexCoord;
 }

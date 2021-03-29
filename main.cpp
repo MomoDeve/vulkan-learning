@@ -39,10 +39,10 @@ bool CheckDeviceProperties(const vk::Instance& instance, const vk::PhysicalDevic
     return false;
 }
 
-struct FrameBufferData
+struct BufferData
 {
-    vk::Framebuffer Buffer;
-    vk::ImageView View;
+    vk::Buffer Buffer;
+    vk::DeviceMemory Memory;
 };
 
 struct VirtualFrame
@@ -71,7 +71,8 @@ struct VulkanStaticData
     vk::RenderPass MainRenderPass; 
     std::array<VirtualFrame, VirtualFrameCount> VirtualFrames; 
     std::vector<vk::ImageView> SwapchainImageViews;
-    vk::Buffer VertexBuffer;
+    BufferData VertexBuffer;
+    BufferData StagingBuffer;
     vk::Pipeline GraphicPipeline;
     vk::Queue DeviceQueue;
     vk::SwapchainKHR Swapchain;
@@ -169,7 +170,7 @@ void WriteCommandBuffer(VulkanStaticData& vulkan, VirtualFrame& frame)
     vk::Rect2D scissor = { vk::Offset2D{ 0, 0 }, vulkan.SurfaceExtent };
     frame.CommandBuffer.setScissor(0, scissor);
 
-    frame.CommandBuffer.bindVertexBuffers(0, vulkan.VertexBuffer, { 0 });
+    frame.CommandBuffer.bindVertexBuffers(0, vulkan.VertexBuffer.Buffer, { 0 });
 
     frame.CommandBuffer.draw(6, 1, 0, 0);
 
@@ -228,81 +229,139 @@ void ProcessFrame(VulkanStaticData& vulkan, VirtualFrame& frame)
     assert(presetSucceeded == vk::Result::eSuccess);
 }
 
-void InitializeVertexBuffer(VulkanStaticData& vulkan)
+BufferData CreateBuffer(VulkanStaticData& vulkan, size_t allocationSize, vk::BufferUsageFlags usageFlags, vk::MemoryPropertyFlagBits memoryProps)
 {
-    std::array vertexData = {
-        VertexData {
-            glm::vec4 { -0.7f, -0.7f, 0.0f, 1.0f },
-            glm::vec4 { 1.0f, 0.0f, 0.0f, 0.0f }
-        },
-        VertexData {
-            glm::vec4 { -0.7f, 0.7f, 0.0f, 1.0f },
-            glm::vec4 { 0.0f, 1.0f, 0.0f, 0.0f }
-        },
-        VertexData {
-            glm::vec4 { 0.7f, -0.7f, 0.0f, 1.0f },
-            glm::vec4 { 0.0f, 0.0f, 1.0f, 0.0f }
-        },
-        VertexData {
-            glm::vec4 { 0.7f, 0.7f, 0.0f, 1.0f },
-            glm::vec4 { 0.3f, 0.3f, 0.3f, 0.0f }
-        },
-        VertexData {
-            glm::vec4 { 0.7f, -0.7f, 0.0f, 1.0f },
-            glm::vec4 { 0.0f, 0.0f, 1.0f, 0.0f }
-        },
-        VertexData {
-            glm::vec4 { -0.7f, 0.7f, 0.0f, 1.0f },
-            glm::vec4 { 0.0f, 1.0f, 0.0f, 0.0f }
-        },
-    };
+    BufferData result;
 
     std::array bufferQueueFamiliyIndicies = { (uint32_t)0 };
 
     vk::BufferCreateInfo bufferCreateInfo;
     bufferCreateInfo
-        .setSize(vertexData.size() * sizeof(VertexData))
-        .setUsage(vk::BufferUsageFlagBits::eVertexBuffer)
+        .setSize(allocationSize)
+        .setUsage(usageFlags)
         .setSharingMode(vk::SharingMode::eExclusive)
         .setQueueFamilyIndices(bufferQueueFamiliyIndicies);
 
-    vulkan.VertexBuffer = vulkan.Device.createBuffer(bufferCreateInfo);
-    vk::DeviceMemory bufferMemory;
+    result.Buffer = vulkan.Device.createBuffer(bufferCreateInfo);
 
-    vk::MemoryRequirements bufferMemoryRequirements = vulkan.Device.getBufferMemoryRequirements(vulkan.VertexBuffer);
+    vk::MemoryRequirements bufferMemoryRequirements = vulkan.Device.getBufferMemoryRequirements(result.Buffer);
     vk::PhysicalDeviceMemoryProperties memoryProperties = vulkan.PhysicalDevice.getMemoryProperties();
 
     size_t memoryTypeIndex = 0;
     for (const auto& property : memoryProperties.memoryTypes)
     {
-        if (property.propertyFlags & vk::MemoryPropertyFlagBits::eHostVisible)
+        if (property.propertyFlags & memoryProps)
         {
             vk::MemoryAllocateInfo memoryAllocateInfo;
             memoryAllocateInfo
                 .setAllocationSize(bufferMemoryRequirements.size)
                 .setMemoryTypeIndex(memoryTypeIndex);
 
-            bufferMemory = vulkan.Device.allocateMemory(memoryAllocateInfo);
-            vulkan.Device.bindBufferMemory(vulkan.VertexBuffer, bufferMemory, 0);
+            result.Memory = vulkan.Device.allocateMemory(memoryAllocateInfo);
+            vulkan.Device.bindBufferMemory(result.Buffer, result.Memory, 0);
             std::cout << "allocated buffer memory (" << bufferMemoryRequirements.size << " bytes)\n";
             break;
         }
         memoryTypeIndex++;
     }
+    if (!(bool)result.Memory) std::cerr << "cannot find requested memory type for buffer" << std::endl;
 
-    void* bufferMemoryPointer = vulkan.Device.mapMemory(bufferMemory, 0, vertexData.size() * sizeof(VertexData));
-    std::memcpy(bufferMemoryPointer, (const void*)vertexData.data(), vertexData.size() * sizeof(VertexData));
+    return result;
+}
+
+void InitializeVertexBuffer(VulkanStaticData& vulkan)
+{
+    std::array vertexData = {
+       VertexData {
+           glm::vec4 { -0.7f, -0.7f, 0.0f, 1.0f },
+           glm::vec4 { 1.0f, 0.0f, 0.0f, 0.0f }
+       },
+       VertexData {
+           glm::vec4 { -0.7f, 0.7f, 0.0f, 1.0f },
+           glm::vec4 { 0.0f, 1.0f, 0.0f, 0.0f }
+       },
+       VertexData {
+           glm::vec4 { 0.7f, -0.7f, 0.0f, 1.0f },
+           glm::vec4 { 0.0f, 0.0f, 1.0f, 0.0f }
+       },
+       VertexData {
+           glm::vec4 { 0.7f, 0.7f, 0.0f, 1.0f },
+           glm::vec4 { 0.3f, 0.3f, 0.3f, 0.0f }
+       },
+       VertexData {
+           glm::vec4 { 0.7f, -0.7f, 0.0f, 1.0f },
+           glm::vec4 { 0.0f, 0.0f, 1.0f, 0.0f }
+       },
+       VertexData {
+           glm::vec4 { -0.7f, 0.7f, 0.0f, 1.0f },
+           glm::vec4 { 0.0f, 1.0f, 0.0f, 0.0f }
+       },
+    };
+    constexpr size_t VertexBufferSize = vertexData.size() * sizeof(VertexData);
+
+    vulkan.VertexBuffer = CreateBuffer(
+        VulkanInstance,
+        VertexBufferSize,
+        vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eTransferDst,
+        vk::MemoryPropertyFlagBits::eDeviceLocal
+    );
+    vulkan.StagingBuffer = CreateBuffer(
+        VulkanInstance,
+        4096,
+        vk::BufferUsageFlagBits::eTransferSrc,
+        vk::MemoryPropertyFlagBits::eHostVisible
+    );
+    std::cout << "buffers created\n";
+
+    void* mappedMemory = vulkan.Device.mapMemory(vulkan.StagingBuffer.Memory, 0, VertexBufferSize);
+    std::memcpy(mappedMemory, (const void*)vertexData.data(), VertexBufferSize);
 
     vk::MappedMemoryRange flushRange;
     flushRange
-        .setMemory(bufferMemory)
-        .setOffset(0)
-        .setSize(vertexData.size() * sizeof(VertexData));
+        .setMemory(vulkan.StagingBuffer.Memory)
+        .setSize(VertexBufferSize)
+        .setOffset(0);
 
     vulkan.Device.flushMappedMemoryRanges(flushRange);
-    vulkan.Device.unmapMemory(bufferMemory);
+    vulkan.Device.unmapMemory(vulkan.StagingBuffer.Memory);
 
-    std::cout << "vertex buffer created\n";
+    vk::CommandBuffer& commandBuffer = vulkan.VirtualFrames.front().CommandBuffer;
+
+    commandBuffer.begin(vk::CommandBufferBeginInfo{ vk::CommandBufferUsageFlagBits::eOneTimeSubmit });
+
+    vk::BufferCopy bufferCopyInfo;
+    bufferCopyInfo
+        .setSrcOffset(0)
+        .setDstOffset(0)
+        .setSize(VertexBufferSize);
+    commandBuffer.copyBuffer(vulkan.StagingBuffer.Buffer, vulkan.VertexBuffer.Buffer, bufferCopyInfo);
+        
+    vk::BufferMemoryBarrier bufferCopyMemoryBarrier;
+    bufferCopyMemoryBarrier
+        .setSrcAccessMask(vk::AccessFlagBits::eMemoryWrite)
+        .setDstAccessMask(vk::AccessFlagBits::eVertexAttributeRead)
+        .setSrcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+        .setDstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+        .setBuffer(vulkan.VertexBuffer.Buffer)
+        .setSize(VertexBufferSize)
+        .setOffset(0);
+
+    commandBuffer.pipelineBarrier(
+        vk::PipelineStageFlagBits::eTransfer,
+        vk::PipelineStageFlagBits::eVertexInput, 
+        { }, // dependency flags
+        { }, // memory barriers
+        bufferCopyMemoryBarrier, 
+        { }  // image memory barriers
+    );
+
+    commandBuffer.end();
+
+    vk::SubmitInfo bufferCopySubmitInfo;
+    bufferCopySubmitInfo.setCommandBuffers(commandBuffer);
+
+    vulkan.DeviceQueue.submit(bufferCopySubmitInfo);
+    vulkan.Device.waitIdle();
 }
 
 void InitializeCommandBuffers(VulkanStaticData& vulkan)
@@ -750,8 +809,8 @@ int main()
 
     auto swapchainImages = VulkanInstance.Device.getSwapchainImagesKHR(VulkanInstance.Swapchain);
 
-    InitializeVertexBuffer(VulkanInstance);
     InitializeCommandBuffers(VulkanInstance);
+    InitializeVertexBuffer(VulkanInstance);
     InitializeRenderPass(VulkanInstance);
     InitializeGraphicPipeline(VulkanInstance);
 
@@ -778,7 +837,8 @@ int main()
 
     VulkanInstance.Device.waitIdle();
 
-    VulkanInstance.Device.destroyBuffer(VulkanInstance.VertexBuffer);
+    VulkanInstance.Device.destroyBuffer(VulkanInstance.VertexBuffer.Buffer);
+    VulkanInstance.Device.destroyBuffer(VulkanInstance.StagingBuffer.Buffer);
 
     VulkanInstance.Device.destroyRenderPass(VulkanInstance.MainRenderPass);
     for (const auto& virtualFrame : VulkanInstance.VirtualFrames)

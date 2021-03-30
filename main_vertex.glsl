@@ -10,8 +10,13 @@ out gl_PerVertex
 
 layout(location = 0) out vec2 vTexCoord;
 
+layout(set = 0, binding = 1) uniform uUniformBuffer
+{
+    mat4 uTransform;
+};
+
 void main() 
 {
-    gl_Position = iPosition;
+    gl_Position = iPosition * uTransform;
     vTexCoord = iTexCoord;
 }

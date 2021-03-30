@@ -2,6 +2,7 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
+#include <glm/gtx/transform.hpp>
 #include <vulkan/vulkan.hpp>
 #include <stb_image.h>
 
@@ -55,6 +56,17 @@ struct ImageData
     vk::ImageView View;
 };
 
+struct VertexData
+{
+    glm::vec4 Position;
+    glm::vec2 TexCoord;
+};
+
+struct UniformData
+{
+    glm::mat4 Transform;
+};
+
 struct DescriptorSetData
 {
     vk::DescriptorSetLayout Layout;
@@ -92,6 +104,7 @@ struct VulkanStaticData
     std::vector<vk::ImageView> SwapchainImageViews;
     BufferData VertexBuffer;
     BufferData StagingBuffer;
+    BufferData UniformBuffer;
     DescriptorSetData DescriptorSet;
     vk::Pipeline GraphicPipeline;
     vk::PipelineLayout GraphicPipelineLayout;
@@ -129,12 +142,6 @@ void UpdateSurfaceExtent(VulkanStaticData& vulkan, int newSurfaceWidth, int newS
     );
 }
 
-struct VertexData
-{
-    glm::vec4 Position;
-    glm::vec2 TexCoord;
-};
-
 void RecreateFramebuffer(VulkanStaticData& vulkan, VirtualFrame& frame, size_t presentImageIndex)
 {
     if ((bool)frame.Framebuffer)
@@ -153,14 +160,48 @@ void RecreateFramebuffer(VulkanStaticData& vulkan, VirtualFrame& frame, size_t p
     frame.Framebuffer = vulkan.Device.createFramebuffer(framebufferCreateInfo);
 }
 
-void WriteCommandBuffer(VulkanStaticData& vulkan, VirtualFrame& frame)
+void WriteCommandBuffer(VulkanStaticData& vulkan, VirtualFrame& frame, const UniformData& uniformData)
 {
     vk::CommandBufferBeginInfo commandBufferBeginInfo;
     commandBufferBeginInfo.setFlags(vk::CommandBufferUsageFlagBits::eOneTimeSubmit);
     frame.CommandBuffer.begin(commandBufferBeginInfo);
 
+    std::memcpy(vulkan.StagingBuffer.HostMemory, (const void*)&uniformData, sizeof(uniformData));
+    vk::MappedMemoryRange flushRange;
+    flushRange
+        .setMemory(vulkan.StagingBuffer.DeviceMemory)
+        .setSize(sizeof(uniformData))
+        .setOffset(0);
+    vulkan.Device.flushMappedMemoryRanges(flushRange);
+
+    vk::BufferCopy bufferCopyInfo;
+    bufferCopyInfo
+        .setSrcOffset(0)
+        .setDstOffset(0)
+        .setSize(sizeof(uniformData));
+    frame.CommandBuffer.copyBuffer(vulkan.StagingBuffer.Buffer, vulkan.UniformBuffer.Buffer, bufferCopyInfo);
+
+    vk::BufferMemoryBarrier bufferCopyMemoryBarrier;
+    bufferCopyMemoryBarrier
+        .setSrcAccessMask(vk::AccessFlagBits::eTransferWrite)
+        .setDstAccessMask(vk::AccessFlagBits::eUniformRead)
+        .setSrcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+        .setDstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+        .setBuffer(vulkan.UniformBuffer.Buffer)
+        .setSize(sizeof(uniformData))
+        .setOffset(0);
+
     frame.CommandBuffer.pipelineBarrier(
-        vk::PipelineStageFlagBits::eBottomOfPipe,
+        vk::PipelineStageFlagBits::eTransfer,
+        vk::PipelineStageFlagBits::eVertexShader,
+        { }, // dependency flags
+        { }, // memory barriers
+        bufferCopyMemoryBarrier,
+        { }  // image memory barriers
+    );
+
+    frame.CommandBuffer.pipelineBarrier(
+        vk::PipelineStageFlagBits::eColorAttachmentOutput,
         vk::PipelineStageFlagBits::eColorAttachmentOutput,
         { }, // dependency flags
         { }, // memory barriers
@@ -168,7 +209,7 @@ void WriteCommandBuffer(VulkanStaticData& vulkan, VirtualFrame& frame)
         { }  // image memory barriers
     );
 
-    vk::ClearColorValue clearColor = std::array{ 1.0f, 0.8f, 0.4f, 1.0f };
+    vk::ClearColorValue clearColor = std::array{ 0.0f, 0.0f, 0.0f, 0.0f };
     vk::ClearValue clearValue;
     clearValue.setColor(clearColor);
 
@@ -210,8 +251,11 @@ void WriteCommandBuffer(VulkanStaticData& vulkan, VirtualFrame& frame)
     frame.CommandBuffer.end();
 }
 
-void ProcessFrame(VulkanStaticData& vulkan, VirtualFrame& frame)
+void ProcessFrame(VulkanStaticData& vulkan, VirtualFrame& frame, float dt, float totalTime)
 {
+    UniformData uniformData;
+    uniformData.Transform = glm::rotate(glm::radians(30.0f) * totalTime, glm::vec3{ 0.0f, 0.0f, 1.0f });
+
     vk::Result waitFenceResult = vulkan.Device.waitForFences(frame.CommandQueueFence, false, UINT64_MAX);
     if (waitFenceResult != vk::Result::eSuccess)
     {
@@ -228,7 +272,7 @@ void ProcessFrame(VulkanStaticData& vulkan, VirtualFrame& frame)
     }
 
     RecreateFramebuffer(vulkan, frame, acquireNextImage.value);
-    WriteCommandBuffer(vulkan, frame);
+    WriteCommandBuffer(vulkan, frame, uniformData);
 
     std::array waitDstStageMask = { (vk::PipelineStageFlags)vk::PipelineStageFlagBits::eTransfer };
 
@@ -310,27 +354,27 @@ void InitializeVertexBuffer(VulkanStaticData& vulkan)
 {
     std::array vertexData = {
        VertexData {
-           glm::vec4 { -0.9f, -0.9f, 0.0f, 1.0f },
+           glm::vec4 { -0.9f, -0.6f, 0.0f, 1.0f },
            glm::vec2 { 0.0f, 0.0f },
        },
        VertexData {
-           glm::vec4 { -0.9f, 0.9f, 0.0f, 1.0f },
+           glm::vec4 { -0.9f, 0.6f, 0.0f, 1.0f },
            glm::vec2 { 0.0f, 1.0f },
        },
        VertexData {
-           glm::vec4 { 0.9f, -0.9f, 0.0f, 1.0f },
+           glm::vec4 { 0.9f, -0.6f, 0.0f, 1.0f },
            glm::vec2 { 1.0f, 0.0f },
        },
        VertexData {
-           glm::vec4 { 0.9f, 0.9f, 0.0f, 1.0f },
+           glm::vec4 { 0.9f, 0.6f, 0.0f, 1.0f },
            glm::vec2 { 1.0f, 1.0f },
        },
        VertexData {
-           glm::vec4 { 0.9f, -0.9f, 0.0f, 1.0f },
+           glm::vec4 { 0.9f, -0.6f, 0.0f, 1.0f },
            glm::vec2 { 1.0f, 0.0f },
        },
        VertexData {
-           glm::vec4 { -0.9f, 0.9f, 0.0f, 1.0f },
+           glm::vec4 { -0.9f, 0.6f, 0.0f, 1.0f },
            glm::vec2 { 0.0f, 1.0f },
        },
     };
@@ -392,6 +436,17 @@ void InitializeVertexBuffer(VulkanStaticData& vulkan)
     vulkan.Device.waitIdle();
 }
 
+void InitializeUniformBuffer(VulkanStaticData& vulkan)
+{
+    vulkan.UniformBuffer = CreateBuffer(
+        VulkanInstance,
+        sizeof(UniformData),
+        vk::BufferUsageFlagBits::eUniformBuffer | vk::BufferUsageFlagBits::eTransferDst,
+        vk::MemoryPropertyFlagBits::eDeviceLocal
+    );
+    std::cout << "uniform buffer created\n";
+}
+
 void InitializeCommandBuffers(VulkanStaticData& vulkan)
 {
     vk::CommandPoolCreateInfo commandPoolCreateInfo;
@@ -419,26 +474,41 @@ void InitializeCommandBuffers(VulkanStaticData& vulkan)
 
 void InitializeDescriptorSet(VulkanStaticData& vulkan)
 {
-    vk::DescriptorSetLayoutBinding layoutBinding;
-    layoutBinding
-        .setDescriptorType(vk::DescriptorType::eCombinedImageSampler)
-        .setDescriptorCount(1)
-        .setStageFlags(vk::ShaderStageFlagBits::eFragment);
+    std::array layoutBindings = {
+        vk::DescriptorSetLayoutBinding {
+            0,
+            vk::DescriptorType::eCombinedImageSampler,
+            1,
+            vk::ShaderStageFlagBits::eFragment
+        },
+        vk::DescriptorSetLayoutBinding {
+            1,
+            vk::DescriptorType::eUniformBuffer,
+            1,
+            vk::ShaderStageFlagBits::eVertex
+        }
+    };
 
     vk::DescriptorSetLayoutCreateInfo descriptorSetLayout;
-    descriptorSetLayout.setBindings(layoutBinding);
+    descriptorSetLayout.setBindings(layoutBindings);
 
     vulkan.DescriptorSet.Layout = vulkan.Device.createDescriptorSetLayout(descriptorSetLayout);
 
-    vk::DescriptorPoolSize poolSize;
-    poolSize
-        .setType(vk::DescriptorType::eCombinedImageSampler)
-        .setDescriptorCount(1);
+    std::array descriptorPoolSizes = {
+        vk::DescriptorPoolSize {
+            vk::DescriptorType::eCombinedImageSampler,
+            1
+        },
+        vk::DescriptorPoolSize {
+            vk::DescriptorType::eUniformBuffer,
+            1
+        }
+    };
 
     vk::DescriptorPoolCreateInfo descriptorPoolCreateInfo;
     descriptorPoolCreateInfo
-        .setMaxSets(1)
-        .setPoolSizes(poolSize);
+        .setPoolSizes(descriptorPoolSizes)
+        .setMaxSets(1);
 
     vulkan.DescriptorSet.Pool = vulkan.Device.createDescriptorPool(descriptorPoolCreateInfo);
 
@@ -455,14 +525,31 @@ void InitializeDescriptorSet(VulkanStaticData& vulkan)
         .setImageView(vulkan.Texture.View)
         .setSampler(vulkan.TextureSampler);
 
-    vk::WriteDescriptorSet writeDescriptorSet;
-    writeDescriptorSet
-        .setDescriptorCount(1)
+    vk::DescriptorBufferInfo descriptorBufferInfo;
+    descriptorBufferInfo
+        .setBuffer(vulkan.UniformBuffer.Buffer)
+        .setOffset(0)
+        .setRange(sizeof(UniformData));
+
+    vk::WriteDescriptorSet descriptorImageWrite;
+    descriptorImageWrite
         .setDstSet(vulkan.DescriptorSet.Set)
+        .setDstBinding(0)
+        .setDstArrayElement(0)
+        .setDescriptorCount(1)
         .setDescriptorType(vk::DescriptorType::eCombinedImageSampler)
         .setImageInfo(descriptorImageInfo);
 
-    vulkan.Device.updateDescriptorSets(writeDescriptorSet, { });
+    vk::WriteDescriptorSet descriptorBufferWrite;
+    descriptorBufferWrite
+        .setDstSet(vulkan.DescriptorSet.Set)
+        .setDstBinding(1)
+        .setDstArrayElement(0)
+        .setDescriptorCount(1)
+        .setDescriptorType(vk::DescriptorType::eUniformBuffer)
+        .setBufferInfo(descriptorBufferInfo);
+
+    vulkan.Device.updateDescriptorSets({ descriptorImageWrite, descriptorBufferWrite }, { });
 }
 
 void InitializeRenderPass(VulkanStaticData& vulkan)
@@ -942,14 +1029,17 @@ int main()
     // create window
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    const int windowWidth = 1200;
-    const int windowHeight = 600;
+    glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
+    glfwWindowHint(GLFW_TRANSPARENT_FRAMEBUFFER, GLFW_TRUE);
+    const int windowWidth = 800;
+    const int windowHeight = 800;
     GLFWwindow* window = glfwCreateWindow(windowWidth, windowHeight, "vulkan-learning", nullptr, nullptr);
     if (glfwCreateWindowSurface(VulkanInstance.Instance, window, nullptr, (VkSurfaceKHR*)&VulkanInstance.Surface) != VkResult::VK_SUCCESS)
     {
         std::cerr << "cannot create surface\n";
         return 0;
     }
+    glfwSetWindowPos(window, 300, 100);
 
     // acquire physical devices
 
@@ -1073,8 +1163,8 @@ int main()
     InitializeCommandBuffers(VulkanInstance);
     InitializeStagingBuffer(VulkanInstance); 
     InitializeVertexBuffer(VulkanInstance);
+    InitializeUniformBuffer(VulkanInstance);
     InitializeTexture(VulkanInstance);
-    InitializeTextureSampler(VulkanInstance);
     InitializeTextureSampler(VulkanInstance);
     InitializeDescriptorSet(VulkanInstance);
     InitializeRenderPass(VulkanInstance);
@@ -1083,11 +1173,19 @@ int main()
     size_t virtualFrameIndex = 0;
     int framesSinceMeasure = 0;
     double measureStartTime = glfwGetTime();
+    float lastFrameTimePoint = (float)glfwGetTime();
     while (!glfwWindowShouldClose(window))
     {
         glfwPollEvents();
 
-        ProcessFrame(VulkanInstance, VulkanInstance.VirtualFrames[virtualFrameIndex]);
+        if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
+            glfwSetWindowShouldClose(window, GLFW_TRUE);
+
+        float currentFrameTimePoint = glfwGetTime();
+        float dt = currentFrameTimePoint - lastFrameTimePoint;
+        lastFrameTimePoint = currentFrameTimePoint;
+
+        ProcessFrame(VulkanInstance, VulkanInstance.VirtualFrames[virtualFrameIndex], dt, currentFrameTimePoint);
 
         if ((++framesSinceMeasure) == 360)
         {
@@ -1104,6 +1202,7 @@ int main()
     VulkanInstance.Device.waitIdle();
 
     VulkanInstance.Device.destroyBuffer(VulkanInstance.VertexBuffer.Buffer);
+    VulkanInstance.Device.destroyBuffer(VulkanInstance.UniformBuffer.Buffer);
     VulkanInstance.Device.unmapMemory(VulkanInstance.StagingBuffer.DeviceMemory);
     VulkanInstance.Device.destroyBuffer(VulkanInstance.StagingBuffer.Buffer);
 

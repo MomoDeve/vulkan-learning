@@ -168,7 +168,7 @@ void WriteCommandBuffer(VulkanStaticData& vulkan, VirtualFrame& frame)
         { }  // image memory barriers
     );
 
-    vk::ClearColorValue clearColor = std::array{ 1.0f, 0.8f, 0.4f, 0.0f };
+    vk::ClearColorValue clearColor = std::array{ 1.0f, 0.8f, 0.4f, 1.0f };
     vk::ClearValue clearValue;
     clearValue.setColor(clearColor);
 
@@ -293,7 +293,7 @@ BufferData CreateBuffer(VulkanStaticData& vulkan, size_t allocationSize, vk::Buf
 
 void InitializeStagingBuffer(VulkanStaticData& vulkan)
 {
-    constexpr size_t StagingBufferSize = 1024 * 1024 * 256;
+    constexpr size_t StagingBufferSize = 1024 * 1024 * 16;
 
     vulkan.StagingBuffer = CreateBuffer(
         VulkanInstance,
@@ -592,9 +592,9 @@ void InitializeGraphicPipeline(VulkanStaticData& vulkan)
 
     vk::PipelineColorBlendAttachmentState colorBlendAttachmentState;
     colorBlendAttachmentState
-        .setBlendEnable(false)
-        .setSrcColorBlendFactor(vk::BlendFactor::eOne)
-        .setDstColorBlendFactor(vk::BlendFactor::eZero)
+        .setBlendEnable(true)
+        .setSrcColorBlendFactor(vk::BlendFactor::eSrcAlpha)
+        .setDstColorBlendFactor(vk::BlendFactor::eOneMinusSrcAlpha)
         .setColorBlendOp(vk::BlendOp::eAdd)
         .setSrcAlphaBlendFactor(vk::BlendFactor::eOne)
         .setDstAlphaBlendFactor(vk::BlendFactor::eZero)
@@ -943,7 +943,7 @@ int main()
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     const int windowWidth = 1200;
-    const int windowHeight = 400;
+    const int windowHeight = 600;
     GLFWwindow* window = glfwCreateWindow(windowWidth, windowHeight, "vulkan-learning", nullptr, nullptr);
     if (glfwCreateWindowSurface(VulkanInstance.Instance, window, nullptr, (VkSurfaceKHR*)&VulkanInstance.Surface) != VkResult::VK_SUCCESS)
     {
@@ -1104,6 +1104,7 @@ int main()
     VulkanInstance.Device.waitIdle();
 
     VulkanInstance.Device.destroyBuffer(VulkanInstance.VertexBuffer.Buffer);
+    VulkanInstance.Device.unmapMemory(VulkanInstance.StagingBuffer.DeviceMemory);
     VulkanInstance.Device.destroyBuffer(VulkanInstance.StagingBuffer.Buffer);
 
     VulkanInstance.Device.destroyImage(VulkanInstance.Texture.Image);
